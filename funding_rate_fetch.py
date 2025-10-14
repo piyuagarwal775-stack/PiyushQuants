@@ -155,19 +155,9 @@ def run_bot():
             send_telegram_message(f"🔍 Funding scan start [{now_str}]")
             print(f"[{now_str}] New cycle started.")
             rates = fetch_funding_rates()
-            
-            # --- DEBUG PATCH: Print ALL rates in Telegram for troubleshooting ---
-            if not rates:
-                send_telegram_message("DEBUG: No rates fetched at all!")
-            else:
-                debug_rates_msg = "DEBUG: All fetched live rates:\n" + "\n".join(
-                    [f"{k}: {100*v:.4f}%" for k, v in sorted(rates.items())]
-                )
-                send_telegram_message(debug_rates_msg)
-            # --------------------------------------------------
-
             eligible = filter_eligible_symbols(rates, FUNDING_RATE_THRESHOLD)
-
+            
+            # --- Funding screener logic: Always suggest/show coins below threshold ---
             if not eligible:
                 send_telegram_message("No coins currently below threshold (-0.3%).")
             else:
@@ -175,6 +165,7 @@ def run_bot():
                 send_telegram_message(msg)
                 print(f"Funding Screener Eligible: {eligible}")
 
+            # --- Main entry/exit logic (no changes here) ---
             if position_exists():
                 send_telegram_message("Active position exists, skipping new entries this cycle.")
                 print("Active position found, skipping new entry.")
@@ -215,5 +206,5 @@ def run_bot():
             print(f"[ERROR] Critical bot error: {e}")
             time.sleep(60)
 
-if __name__ == "__main__":
-    run_bot()
+if _name_ == "_main_":
+    run_bot()
