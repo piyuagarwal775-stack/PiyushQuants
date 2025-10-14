@@ -14,7 +14,6 @@ TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 FUNDING_RATE_THRESHOLD = float(os.getenv('FUNDING_RATE_THRESHOLD', '-0.005'))
 client = Client(API_KEY, API_SECRET)
 
-# --- Helper Function: Telegram Alert ---
 def send_telegram_message(message: str):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
@@ -22,7 +21,6 @@ def send_telegram_message(message: str):
     except Exception as e:
         print(f"Telegram error: {e}")
 
-# --- Helper Function: Binance Funds ---
 def get_wallet_equity():
     try:
         acc = client.futures_account_balance()
@@ -66,7 +64,6 @@ def is_entry_window_open():
 def is_close_window_open():
     return 0 < seconds_to_next_funding() <= 60
 
-# --- Trading Logic ---
 def position_exists():
     try:
         positions = client.futures_position_information()
@@ -80,8 +77,8 @@ def place_long_position(symbol, capital):
     try:
         ticker = client.futures_symbol_ticker(symbol=symbol)
         price = float(ticker['price'])
-        quantity = round(capital / price, 3)   # Fully invest capital, 3 decimals
-        stop_loss_price = round(price * 0.90, 3)  # 10% SL
+        quantity = round(capital / price, 3)
+        stop_loss_price = round(price * 0.90, 3)
         order = client.futures_create_order(
             symbol=symbol,
             side=Client.SIDE_BUY,
@@ -121,7 +118,6 @@ def square_off_all():
     except Exception as e:
         send_telegram_message(f"Position close error: {e}")
 
-# --- Main Bot Loop ---
 def run_bot():
     send_telegram_message("🚦Bot started & monitoring! [Health OK]")
     last_report = time.time()
@@ -136,35 +132,31 @@ def run_bot():
             else:
                 msg = "Eligible coins below threshold (-0.5%):\n" + "\n".join([f"{k}: {100*v:.2f}%" for k,v in eligible.items()])
                 send_telegram_message(msg)
-            # If position already exists, skip new entry
             if position_exists():
                 send_telegram_message("Active position exists, skipping new entries this cycle.")
             else:
-                # Entry window check
                 if is_entry_window_open():
                     send_telegram_message("Entry window open, rechecking shortlisted rates...")
                     capital = get_wallet_equity()
                     for sym in eligible:
-                        rate = fetch_funding_rates()[sym] # re-check live
+                        rate = fetch_funding_rates()[sym]
                         if rate <= FUNDING_RATE_THRESHOLD:
                             place_long_position(sym, capital)
-                            break   # Only first eligible, as full capital is invested
+                            break
                         else:
                             send_telegram_message(f"{sym} skipped, current rate {100*rate:.2f}% above threshold.")
                 else:
                     send_telegram_message("Entry window not open.")
-            # Last 1 min: Close all
             if is_close_window_open() and position_exists():
                 send_telegram_message("Close window, squaring off all positions.")
                 square_off_all()
-            # Daily/Health report after 12 hours
             if time.time() - last_report > 43200:
                 send_telegram_message("Daily status: Bot healthy, no critical issues.")
                 last_report = time.time()
-            time.sleep(3600)  # Sleep 1 hour as requested
+            time.sleep(3600)
         except Exception as e:
             send_telegram_message(f"Critical bot error: {e}")
             time.sleep(60)
 
-if _name_ == "_main_":
+if __name__ == "__main__":
     run_bot()
