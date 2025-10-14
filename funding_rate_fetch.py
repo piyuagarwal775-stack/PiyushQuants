@@ -11,7 +11,7 @@ API_KEY = os.getenv('BINANCE_API_KEY')
 API_SECRET = os.getenv('BINANCE_API_SECRET')
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
-FUNDING_RATE_THRESHOLD = float(os.getenv('FUNDING_RATE_THRESHOLD', '-0.003'))  # Changed to -0.3%
+FUNDING_RATE_THRESHOLD = float(os.getenv('FUNDING_RATE_THRESHOLD', '-0.003'))  # -0.3%
 client = Client(API_KEY, API_SECRET)
 
 # --- Helper Function: Telegram Alert ---
@@ -38,18 +38,20 @@ def get_wallet_equity():
         return 0.0
 
 def fetch_funding_rates():
-    print("Fetching funding rates for all perpetual symbols...")
+    print("Fetching live funding rates (predicted/next) for all perpetual symbols...")
     try:
         info = client.futures_exchange_info()
         symbols = [s['symbol'] for s in info['symbols'] if s['contractType'] == 'PERPETUAL' and s['status'] == 'TRADING']
         print(f"Active symbols: {symbols}")
         rates = {}
-        all_rates = client.futures_funding_rate()
-        rate_map = {rate['symbol']: float(rate['fundingRate']) for rate in all_rates}
         for symbol in symbols:
-            if symbol in rate_map:
-                rates[symbol] = rate_map[symbol]
-        print(f"Funding rates fetched: {rates}")
+            try:
+                idx = client.futures_premium_index(symbol=symbol)
+                rate = float(idx['lastFundingRate'])
+                rates[symbol] = rate
+            except Exception as e:
+                print(f"[WARNING] Funding rate fetch failed for {symbol}: {e}")
+        print(f"Funding rates fetched (predicted): {rates}")
         return rates
     except Exception as e:
         send_telegram_message(f"Funding rate fetch error: {e}")
@@ -164,7 +166,7 @@ def run_bot():
                 send_telegram_message("No eligible coins found below threshold.")
                 print("No eligible coins found below threshold.")
             else:
-                msg = "Eligible coins below threshold (-0.3%):\n" + "\n".join([f"{k}: {100*v:.2f}%" for k,v in eligible.items()])
+                msg = "Eligible coins below threshold (-0.3%):\n" + "\n".join([f"{k}: {100*v:.4f}%" for k,v in eligible.items()])
                 send_telegram_message(msg)
                 print(f"Eligible coins: {eligible}")
             if position_exists():
@@ -176,7 +178,13 @@ def run_bot():
                     capital = get_wallet_equity()
                     print("Entry window: Checking eligible coins live for entry...")
                     for sym in eligible:
-                        rate = fetch_funding_rates()[sym]
+                        # Refetch funding rate for accuracy
+                        try:
+                            idx = client.futures_premium_index(symbol=sym)
+                            rate = float(idx['lastFundingRate'])
+                        except Exception as e:
+                            print(f"Live refetch failed for {sym}: {e}")
+                            continue
                         print(f"{sym} new fetched rate: {rate}")
                         if rate <= FUNDING_RATE_THRESHOLD:
                             place_long_position(sym, capital)
