@@ -11,7 +11,7 @@ API_KEY = os.getenv('BINANCE_API_KEY')
 API_SECRET = os.getenv('BINANCE_API_SECRET')
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
-FUNDING_RATE_THRESHOLD = float(os.getenv('FUNDING_RATE_THRESHOLD', '-0.005'))
+FUNDING_RATE_THRESHOLD = float(os.getenv('FUNDING_RATE_THRESHOLD', '-0.003'))  # Changed to -0.3%
 client = Client(API_KEY, API_SECRET)
 
 # --- Helper Function: Telegram Alert ---
@@ -164,7 +164,7 @@ def run_bot():
                 send_telegram_message("No eligible coins found below threshold.")
                 print("No eligible coins found below threshold.")
             else:
-                msg = "Eligible coins below threshold (-0.5%):\n" + "\n".join([f"{k}: {100*v:.2f}%" for k,v in eligible.items()])
+                msg = "Eligible coins below threshold (-0.3%):\n" + "\n".join([f"{k}: {100*v:.2f}%" for k,v in eligible.items()])
                 send_telegram_message(msg)
                 print(f"Eligible coins: {eligible}")
             if position_exists():
