@@ -5,7 +5,6 @@ from datetime import datetime, timezone, timedelta
 from binance.client import Client
 from dotenv import load_dotenv
 
-# 1. SETUP & CONFIGURATION
 load_dotenv()
 API_KEY = os.getenv('BINANCE_API_KEY')
 API_SECRET = os.getenv('BINANCE_API_SECRET')
@@ -14,7 +13,6 @@ TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 FUNDING_RATE_THRESHOLD = float(os.getenv('FUNDING_RATE_THRESHOLD', '-0.003'))  # -0.3%
 client = Client(API_KEY, API_SECRET)
 
-# --- Helper Function: Telegram Alert ---
 def send_telegram_message(message: str):
     print(f"[TELEGRAM] {message}")
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -23,7 +21,6 @@ def send_telegram_message(message: str):
     except Exception as e:
         print(f"Telegram error: {e}")
 
-# --- Helper Function: Binance Funds ---
 def get_wallet_equity():
     print("Fetching wallet equity...")
     try:
@@ -38,7 +35,7 @@ def get_wallet_equity():
         return 0.0
 
 def fetch_funding_rates():
-    print("Fetching live funding rates (predicted/next) for all perpetual symbols...")
+    print("Fetching live funding rates for all perpetual symbols...")
     try:
         info = client.futures_exchange_info()
         symbols = [s['symbol'] for s in info['symbols'] if s['contractType'] == 'PERPETUAL' and s['status'] == 'TRADING']
@@ -83,8 +80,6 @@ def is_close_window_open():
     open_ = 0 < seconds_to_next_funding() <= 60
     print(f"Close window open? {open_}")
     return open_
-
-# --- Trading Logic ---
 
 def position_exists():
     print("Checking for existing open positions...")
@@ -150,7 +145,6 @@ def square_off_all():
         send_telegram_message(f"Position close error: {e}")
         print(f"[ERROR] square_off_all: {e}")
 
-# --- Main Bot Loop ---
 def run_bot():
     print("##### Bot starting... #####")
     send_telegram_message("🚦Bot started & monitoring! [Health OK]")
@@ -162,13 +156,16 @@ def run_bot():
             print(f"[{now_str}] New cycle started.")
             rates = fetch_funding_rates()
             eligible = filter_eligible_symbols(rates, FUNDING_RATE_THRESHOLD)
+            
+            # --- Funding screener logic: Always suggest/show coins below threshold ---
             if not eligible:
-                send_telegram_message("No eligible coins found below threshold.")
-                print("No eligible coins found below threshold.")
+                send_telegram_message("No coins currently below threshold (-0.3%).")
             else:
-                msg = "Eligible coins below threshold (-0.3%):\n" + "\n".join([f"{k}: {100*v:.4f}%" for k,v in eligible.items()])
+                msg = "Funding screener (all coins below threshold):\n" + "\n".join([f"{k}: {100*v:.4f}%" for k,v in eligible.items()])
                 send_telegram_message(msg)
-                print(f"Eligible coins: {eligible}")
+                print(f"Funding Screener Eligible: {eligible}")
+
+            # --- Main entry/exit logic (no changes here) ---
             if position_exists():
                 send_telegram_message("Active position exists, skipping new entries this cycle.")
                 print("Active position found, skipping new entry.")
@@ -178,7 +175,6 @@ def run_bot():
                     capital = get_wallet_equity()
                     print("Entry window: Checking eligible coins live for entry...")
                     for sym in eligible:
-                        # Refetch funding rate for accuracy
                         try:
                             idx = client.futures_premium_index(symbol=sym)
                             rate = float(idx['lastFundingRate'])
