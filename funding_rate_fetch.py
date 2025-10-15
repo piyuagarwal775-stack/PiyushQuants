@@ -206,5 +206,5 @@ def run_bot():
             print(f"[ERROR] Critical bot error: {e}")
             time.sleep(60)
 
-if _name_ == "_main_":
-    run_bot()
+if __name__ == "__main__":
+    run_bot()
