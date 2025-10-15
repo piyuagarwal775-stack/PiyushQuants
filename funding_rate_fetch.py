@@ -35,20 +35,25 @@ def get_wallet_equity():
         return 0.0
 
 def fetch_funding_rates():
-    print("Fetching live funding rates for all perpetual symbols...")
+    print("Fetching CURRENT funding rates for all perpetual symbols...")
     try:
         info = client.futures_exchange_info()
         symbols = [s['symbol'] for s in info['symbols'] if s['contractType'] == 'PERPETUAL' and s['status'] == 'TRADING']
-        print(f"Active symbols: {symbols}")
+        print(f"Total active perpetual symbols: {len(symbols)}")
         rates = {}
         for symbol in symbols:
             try:
-                idx = client.futures_premium_index(symbol=symbol)
-                rate = float(idx['lastFundingRate'])
-                rates[symbol] = rate
+                # Get the CURRENT funding rate (last applied rate)
+                funding_data = client.futures_funding_rate(symbol=symbol, limit=1)
+                if funding_data:
+                    rate = float(funding_data[0]['fundingRate'])
+                    rates[symbol] = rate
             except Exception as e:
                 print(f"[WARNING] Funding rate fetch failed for {symbol}: {e}")
-        print(f"Funding rates fetched (predicted): {rates}")
+        
+        # Show summary
+        negative_count = sum(1 for r in rates.values() if r < 0)
+        print(f"Funding rates fetched: {len(rates)} symbols, {negative_count} with negative rates")
         return rates
     except Exception as e:
         send_telegram_message(f"Funding rate fetch error: {e}")
@@ -57,7 +62,7 @@ def fetch_funding_rates():
 
 def filter_eligible_symbols(rates, threshold):
     filtered = {sym: rate for sym, rate in rates.items() if rate <= threshold}
-    print(f"Filtered eligible symbols (<= {threshold}): {filtered}")
+    print(f"Filtered eligible symbols (<= {threshold}): {len(filtered)} found")
     return filtered
 
 def seconds_to_next_funding():
@@ -147,37 +152,48 @@ def square_off_all():
 
 def run_bot():
     print("##### Bot starting... #####")
-    send_telegram_message("🚦Bot started & monitoring! [Health OK]")
+    send_telegram_message("🚦Bot started & monitoring LIVE funding rates! [Health OK]")
     last_report = time.time()
     while True:
         try:
             now_str = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
-            send_telegram_message(f"🔍 Funding scan start [{now_str}]")
+            send_telegram_message(f"🔍 LIVE Funding scan start [{now_str}]")
             print(f"[{now_str}] New cycle started.")
             rates = fetch_funding_rates()
             eligible = filter_eligible_symbols(rates, FUNDING_RATE_THRESHOLD)
             
             # --- Funding screener logic: Always suggest/show coins below threshold ---
             if not eligible:
-                send_telegram_message("No coins currently below threshold (-0.3%).")
+                # Show some stats even when nothing is below threshold
+                negative_rates = {k: v for k, v in sorted(rates.items(), key=lambda x: x[1])[:10]}
+                msg = f"❌ No coins below -0.3% threshold.\n\nTop 10 most negative rates:\n"
+                msg += "\n".join([f"{k}: {100*v:.4f}%" for k,v in negative_rates.items()])
+                send_telegram_message(msg)
             else:
-                msg = "Funding screener (all coins below threshold):\n" + "\n".join([f"{k}: {100*v:.4f}%" for k,v in eligible.items()])
+                msg = f"✅ {len(eligible)} coins below -0.3% threshold:\n\n"
+                # Sort by rate (most negative first)
+                sorted_eligible = sorted(eligible.items(), key=lambda x: x[1])
+                msg += "\n".join([f"{k}: {100*v:.4f}%" for k,v in sorted_eligible])
                 send_telegram_message(msg)
                 print(f"Funding Screener Eligible: {eligible}")
 
-            # --- Main entry/exit logic (no changes here) ---
+            # --- Main entry/exit logic ---
             if position_exists():
                 send_telegram_message("Active position exists, skipping new entries this cycle.")
                 print("Active position found, skipping new entry.")
             else:
                 if is_entry_window_open():
-                    send_telegram_message("Entry window open, rechecking shortlisted rates...")
+                    send_telegram_message("⏰ Entry window open, rechecking shortlisted rates...")
                     capital = get_wallet_equity()
                     print("Entry window: Checking eligible coins live for entry...")
                     for sym in eligible:
                         try:
-                            idx = client.futures_premium_index(symbol=sym)
-                            rate = float(idx['lastFundingRate'])
+                            # Re-fetch to confirm rate is still below threshold
+                            funding_data = client.futures_funding_rate(symbol=sym, limit=1)
+                            if funding_data:
+                                rate = float(funding_data[0]['fundingRate'])
+                            else:
+                                continue
                         except Exception as e:
                             print(f"Live refetch failed for {sym}: {e}")
                             continue
@@ -189,16 +205,18 @@ def run_bot():
                             send_telegram_message(f"{sym} skipped, current rate {100*rate:.2f}% above threshold.")
                             print(f"{sym} skipped, current rate {100*rate:.2f}% above threshold.")
                 else:
-                    send_telegram_message("Entry window not open.")
                     print("Entry window not open.")
+            
             if is_close_window_open() and position_exists():
-                send_telegram_message("Close window, squaring off all positions.")
+                send_telegram_message("⏰ Close window, squaring off all positions.")
                 print("Close window: Squaring off all positions.")
                 square_off_all()
+            
             if time.time() - last_report > 43200:
-                send_telegram_message("Daily status: Bot healthy, no critical issues.")
+                send_telegram_message("📊 Daily status: Bot healthy, no critical issues.")
                 print("Daily health report sent to Telegram.")
                 last_report = time.time()
+            
             print("Cycle complete. Sleeping for 1 hour...\n")
             time.sleep(3600)
         except Exception as e:
