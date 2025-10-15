@@ -27,8 +27,10 @@ def get_wallet_equity():
         acc = client.futures_account_balance()
         usdt = next((x for x in acc if x['asset'] == 'USDT'), None)
         print(f"Account balance (USDT): {usdt}")
-        if usdt: return float(usdt['balance'])
-        else: return 0.0
+        if usdt: 
+            return float(usdt['balance'])
+        else: 
+            return 0.0
     except Exception as e:
         send_telegram_message(f"Funds API error: {e}")
         print(f"[ERROR] get_wallet_equity: {e}")
@@ -75,6 +77,19 @@ def seconds_to_next_funding():
     print(f"Seconds to next funding: {secs}")
     return secs
 
+def format_countdown(seconds):
+    """Convert seconds to readable format: Xh Ym Zs"""
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    
+    if hours > 0:
+        return f"{hours}h {minutes}m {secs}s"
+    elif minutes > 0:
+        return f"{minutes}m {secs}s"
+    else:
+        return f"{secs}s"
+
 def is_entry_window_open():
     open_ = 0 < seconds_to_next_funding() <= 45 * 60
     print(f"Entry window open? {open_}")
@@ -111,7 +126,7 @@ def place_long_position(symbol, capital):
             quantity=quantity,
             positionSide='LONG'
         )
-        send_telegram_message(f"LONG order: {symbol} QTY {quantity} @ {price}. SL: {stop_loss_price}")
+        send_telegram_message(f"✅ LONG order: {symbol} QTY {quantity} @ {price}. SL: {stop_loss_price}")
         print(f"LONG order placed for {symbol}. Order: {order}")
         sl_order = client.futures_create_order(
             symbol=symbol,
@@ -121,7 +136,7 @@ def place_long_position(symbol, capital):
             closePosition=True,
             workingType='MARK_PRICE'
         )
-        send_telegram_message(f"STOPLOSS placed for {symbol} at {stop_loss_price}")
+        send_telegram_message(f"🛡️ STOPLOSS placed for {symbol} at {stop_loss_price}")
         print(f"STOPLOSS order placed for {symbol}. Order: {sl_order}")
     except Exception as e:
         send_telegram_message(f"Trade error on {symbol}: {e}")
@@ -143,47 +158,83 @@ def square_off_all():
                     positionSide='LONG',
                     reduceOnly=True
                 )
-                send_telegram_message(f"Position closed: {sym} QTY {amt}")
+                send_telegram_message(f"✅ Position closed: {sym} QTY {amt}")
                 print(f"Position closed: {sym}, qty: {amt}. Close order: {close_order}")
     except Exception as e:
         send_telegram_message(f"Position close error: {e}")
         print(f"[ERROR] square_off_all: {e}")
 
+def track_pnl():
+    """Track P&L from funding fees - NEWLY ADDED"""
+    print("Tracking P&L from funding fees...")
+    try:
+        income = client.futures_income_history(incomeType='FUNDING_FEE', limit=100)
+        total_funding = sum(float(x['income']) for x in income)
+        
+        # Count recent funding payments
+        recent_funding = [x for x in income if float(x['income']) != 0]
+        count = len(recent_funding)
+        
+        # Get last 24h funding
+        last_24h = sum(float(x['income']) for x in income if (time.time() - int(x['time'])/1000) <= 86400)
+        
+        msg = f"💰 Funding P&L Report:\n"
+        msg += f"Total collected: ${total_funding:.4f} USDT\n"
+        msg += f"Last 24h: ${last_24h:.4f} USDT\n"
+        msg += f"Funding payments: {count}"
+        
+        send_telegram_message(msg)
+        print(f"P&L Report - Total: ${total_funding:.4f}, 24h: ${last_24h:.4f}, Count: {count}")
+    except Exception as e:
+        send_telegram_message(f"P&L tracking error: {e}")
+        print(f"[ERROR] track_pnl: {e}")
+
 def run_bot():
     print("##### Bot starting... #####")
-    send_telegram_message("🚦Bot started & monitoring PREDICTED funding rates! [Health OK]")
+    send_telegram_message("🚦 Bot started & monitoring PREDICTED funding rates! [Health OK]")
     last_report = time.time()
     while True:
         try:
             now_str = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
-            send_telegram_message(f"🔍 PREDICTED Funding scan start [{now_str}]")
-            print(f"[{now_str}] New cycle started.")
+            
+            # Get countdown
+            countdown_secs = seconds_to_next_funding()
+            countdown_str = format_countdown(countdown_secs)
+            
+            send_telegram_message(f"🔍 PREDICTED Funding scan start [{now_str}]\n⏱️ Next funding in: {countdown_str}")
+            print(f"[{now_str}] New cycle started. Countdown: {countdown_str}")
+            
             rates = fetch_funding_rates()
             eligible = filter_eligible_symbols(rates, FUNDING_RATE_THRESHOLD)
             
             # --- Funding screener logic ---
             if not eligible:
                 negative_rates = {k: v for k, v in sorted(rates.items(), key=lambda x: x[1])[:10]}
-                msg = f"❌ No coins below -0.3% threshold.\n\nTop 10 most negative rates:\n"
+                msg = f"❌ No coins below -0.3% threshold.\n⏱️ Countdown: {countdown_str}\n\nTop 10 most negative rates:\n"
                 msg += "\n".join([f"{k}: {100*v:.4f}%" for k,v in negative_rates.items()])
                 send_telegram_message(msg)
             else:
-                msg = f"✅ {len(eligible)} coins below -0.3% threshold:\n\n"
+                msg = f"✅ {len(eligible)} coins below -0.3% threshold:\n⏱️ Countdown: {countdown_str}\n\n"
                 sorted_eligible = sorted(eligible.items(), key=lambda x: x[1])
                 msg += "\n".join([f"{k}: {100*v:.4f}%" for k,v in sorted_eligible])
+                msg += f"\n\n🎯 Will enter: {sorted_eligible[0][0]} (most negative)"
                 send_telegram_message(msg)
                 print(f"Funding Screener Eligible: {eligible}")
 
             # --- Main entry/exit logic ---
             if position_exists():
-                send_telegram_message("Active position exists, skipping new entries this cycle.")
+                send_telegram_message(f"📊 Active position exists, skipping new entries.\n⏱️ Countdown: {countdown_str}")
                 print("Active position found, skipping new entry.")
             else:
                 if is_entry_window_open():
-                    send_telegram_message("⏰ Entry window open, rechecking shortlisted rates...")
+                    send_telegram_message(f"⏰ Entry window OPEN! Rechecking rates...\n⏱️ Countdown: {countdown_str}")
                     capital = get_wallet_equity()
                     print("Entry window: Checking eligible coins live for entry...")
-                    for sym in eligible:
+                    
+                    # Sort eligible by most negative first
+                    sorted_eligible = sorted(eligible.items(), key=lambda x: x[1])
+                    
+                    for sym, _ in sorted_eligible:
                         try:
                             # Re-fetch PREDICTED rate to confirm
                             premium_index = client.futures_mark_price(symbol=sym)
@@ -193,20 +244,23 @@ def run_bot():
                             continue
                         print(f"{sym} new fetched rate: {rate}")
                         if rate <= FUNDING_RATE_THRESHOLD:
+                            send_telegram_message(f"🎯 Selected: {sym} with rate {100*rate:.4f}%")
                             place_long_position(sym, capital)
                             break
                         else:
                             send_telegram_message(f"{sym} skipped, current rate {100*rate:.2f}% above threshold.")
                             print(f"{sym} skipped, current rate {100*rate:.2f}% above threshold.")
                 else:
-                    print("Entry window not open.")
+                    print(f"Entry window not open. Countdown: {countdown_str}")
             
             if is_close_window_open() and position_exists():
-                send_telegram_message("⏰ Close window, squaring off all positions.")
+                send_telegram_message(f"⏰ Close window OPEN! Squaring off all positions.\n⏱️ Countdown: {countdown_str}")
                 print("Close window: Squaring off all positions.")
                 square_off_all()
             
+            # Daily report with P&L tracking
             if time.time() - last_report > 43200:
+                track_pnl()  # NEW: Track P&L every 12 hours
                 send_telegram_message("📊 Daily status: Bot healthy, no critical issues.")
                 print("Daily health report sent to Telegram.")
                 last_report = time.time()
