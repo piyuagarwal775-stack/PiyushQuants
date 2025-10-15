@@ -1,1 +1,1 @@
-worker: python3 funding_rate_fetch.py
+worker: python your_script_name.py
