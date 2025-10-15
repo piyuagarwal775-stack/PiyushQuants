@@ -35,7 +35,7 @@ def get_wallet_equity():
         return 0.0
 
 def fetch_funding_rates():
-    print("Fetching CURRENT funding rates for all perpetual symbols...")
+    print("Fetching PREDICTED funding rates (next funding) for all perpetual symbols...")
     try:
         info = client.futures_exchange_info()
         symbols = [s['symbol'] for s in info['symbols'] if s['contractType'] == 'PERPETUAL' and s['status'] == 'TRADING']
@@ -43,11 +43,10 @@ def fetch_funding_rates():
         rates = {}
         for symbol in symbols:
             try:
-                # Get the CURRENT funding rate (last applied rate)
-                funding_data = client.futures_funding_rate(symbol=symbol, limit=1)
-                if funding_data:
-                    rate = float(funding_data[0]['fundingRate'])
-                    rates[symbol] = rate
+                # Get PREDICTED funding rate (what will be charged next)
+                premium_index = client.futures_mark_price(symbol=symbol)
+                rate = float(premium_index['lastFundingRate'])
+                rates[symbol] = rate
             except Exception as e:
                 print(f"[WARNING] Funding rate fetch failed for {symbol}: {e}")
         
@@ -152,26 +151,24 @@ def square_off_all():
 
 def run_bot():
     print("##### Bot starting... #####")
-    send_telegram_message("🚦Bot started & monitoring LIVE funding rates! [Health OK]")
+    send_telegram_message("🚦Bot started & monitoring PREDICTED funding rates! [Health OK]")
     last_report = time.time()
     while True:
         try:
             now_str = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
-            send_telegram_message(f"🔍 LIVE Funding scan start [{now_str}]")
+            send_telegram_message(f"🔍 PREDICTED Funding scan start [{now_str}]")
             print(f"[{now_str}] New cycle started.")
             rates = fetch_funding_rates()
             eligible = filter_eligible_symbols(rates, FUNDING_RATE_THRESHOLD)
             
-            # --- Funding screener logic: Always suggest/show coins below threshold ---
+            # --- Funding screener logic ---
             if not eligible:
-                # Show some stats even when nothing is below threshold
                 negative_rates = {k: v for k, v in sorted(rates.items(), key=lambda x: x[1])[:10]}
                 msg = f"❌ No coins below -0.3% threshold.\n\nTop 10 most negative rates:\n"
                 msg += "\n".join([f"{k}: {100*v:.4f}%" for k,v in negative_rates.items()])
                 send_telegram_message(msg)
             else:
                 msg = f"✅ {len(eligible)} coins below -0.3% threshold:\n\n"
-                # Sort by rate (most negative first)
                 sorted_eligible = sorted(eligible.items(), key=lambda x: x[1])
                 msg += "\n".join([f"{k}: {100*v:.4f}%" for k,v in sorted_eligible])
                 send_telegram_message(msg)
@@ -188,12 +185,9 @@ def run_bot():
                     print("Entry window: Checking eligible coins live for entry...")
                     for sym in eligible:
                         try:
-                            # Re-fetch to confirm rate is still below threshold
-                            funding_data = client.futures_funding_rate(symbol=sym, limit=1)
-                            if funding_data:
-                                rate = float(funding_data[0]['fundingRate'])
-                            else:
-                                continue
+                            # Re-fetch PREDICTED rate to confirm
+                            premium_index = client.futures_mark_price(symbol=sym)
+                            rate = float(premium_index['lastFundingRate'])
                         except Exception as e:
                             print(f"Live refetch failed for {sym}: {e}")
                             continue
