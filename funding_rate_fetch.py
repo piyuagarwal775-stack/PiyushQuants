@@ -91,8 +91,11 @@ def format_countdown(seconds):
         return f"{secs}s"
 
 def is_entry_window_open():
-    open_ = 0 < seconds_to_next_funding() <= 45 * 60
-    print(f"Entry window open? {open_}")
+    """Check if within 45-47 min window (before 46 min mark)"""
+    secs = seconds_to_next_funding()
+    # Entry at 45-47 min remaining
+    open_ = 2700 <= secs <= 2820
+    print(f"Entry window open (45-47min)? {open_}")
     return open_
 
 def is_close_window_open():
@@ -165,7 +168,7 @@ def square_off_all():
         print(f"[ERROR] square_off_all: {e}")
 
 def track_pnl():
-    """Track P&L from funding fees - NEWLY ADDED"""
+    """Track P&L from funding fees"""
     print("Tracking P&L from funding fees...")
     try:
         income = client.futures_income_history(incomeType='FUNDING_FEE', limit=100)
@@ -193,6 +196,7 @@ def run_bot():
     print("##### Bot starting... #####")
     send_telegram_message("🚦 Bot started & monitoring PREDICTED funding rates! [Health OK]")
     last_report = time.time()
+    
     while True:
         try:
             now_str = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
@@ -226,32 +230,35 @@ def run_bot():
                 send_telegram_message(f"📊 Active position exists, skipping new entries.\n⏱️ Countdown: {countdown_str}")
                 print("Active position found, skipping new entry.")
             else:
+                # *** KEY CHANGE: Entry at 46 min (45-47 min window) ***
                 if is_entry_window_open():
-                    send_telegram_message(f"⏰ Entry window OPEN! Rechecking rates...\n⏱️ Countdown: {countdown_str}")
+                    send_telegram_message(f"⏰ ENTRY TIME (46min)! Re-scanning to confirm best coin...\n⏱️ Countdown: {countdown_str}")
                     capital = get_wallet_equity()
-                    print("Entry window: Checking eligible coins live for entry...")
+                    print("Entry window (46min): RE-SCANNING all coins to find lowest negative...")
                     
-                    # Sort eligible by most negative first
-                    sorted_eligible = sorted(eligible.items(), key=lambda x: x[1])
+                    # RE-SCAN ALL COINS to find current lowest
+                    fresh_rates = fetch_funding_rates()
+                    fresh_eligible = filter_eligible_symbols(fresh_rates, FUNDING_RATE_THRESHOLD)
                     
-                    for sym, _ in sorted_eligible:
-                        try:
-                            # Re-fetch PREDICTED rate to confirm
-                            premium_index = client.futures_mark_price(symbol=sym)
-                            rate = float(premium_index['lastFundingRate'])
-                        except Exception as e:
-                            print(f"Live refetch failed for {sym}: {e}")
-                            continue
-                        print(f"{sym} new fetched rate: {rate}")
-                        if rate <= FUNDING_RATE_THRESHOLD:
-                            send_telegram_message(f"🎯 Selected: {sym} with rate {100*rate:.4f}%")
-                            place_long_position(sym, capital)
-                            break
-                        else:
-                            send_telegram_message(f"{sym} skipped, current rate {100*rate:.2f}% above threshold.")
-                            print(f"{sym} skipped, current rate {100*rate:.2f}% above threshold.")
+                    if not fresh_eligible:
+                        send_telegram_message("❌ No eligible coins at entry time (all rates changed above -0.3%)")
+                        print("No eligible coins at entry time")
+                    else:
+                        # Sort by most negative to find LOWEST
+                        sorted_fresh = sorted(fresh_eligible.items(), key=lambda x: x[1])
+                        best_symbol = sorted_fresh[0][0]
+                        best_rate = sorted_fresh[0][1]
+                        
+                        msg = f"🔄 CONFIRMATION SCAN (46min):\n\n"
+                        msg += "\n".join([f"{k}: {100*v:.4f}%" for k,v in sorted_fresh[:5]])  # Show top 5
+                        msg += f"\n\n✅ Confirmed LOWEST: {best_symbol} ({100*best_rate:.4f}%)"
+                        msg += f"\n🚀 Entering position..."
+                        send_telegram_message(msg)
+                        
+                        print(f"CONFIRMED LOWEST: {best_symbol} with rate {best_rate}")
+                        place_long_position(best_symbol, capital)
                 else:
-                    print(f"Entry window not open. Countdown: {countdown_str}")
+                    print(f"Not entry time yet. Countdown: {countdown_str}")
             
             if is_close_window_open() and position_exists():
                 send_telegram_message(f"⏰ Close window OPEN! Squaring off all positions.\n⏱️ Countdown: {countdown_str}")
@@ -260,13 +267,14 @@ def run_bot():
             
             # Daily report with P&L tracking
             if time.time() - last_report > 43200:
-                track_pnl()  # NEW: Track P&L every 12 hours
+                track_pnl()
                 send_telegram_message("📊 Daily status: Bot healthy, no critical issues.")
                 print("Daily health report sent to Telegram.")
                 last_report = time.time()
             
             print("Cycle complete. Sleeping for 1 hour...\n")
-            time.sleep(3600)
+            time.sleep(3600)  # 1 hour sleep
+            
         except Exception as e:
             send_telegram_message(f"Critical bot error: {e}")
             print(f"[ERROR] Critical bot error: {e}")
