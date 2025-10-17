@@ -11,10 +11,12 @@ API_SECRET = os.getenv('BINANCE_API_SECRET')
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 FUNDING_RATE_THRESHOLD = float(os.getenv('FUNDING_RATE_THRESHOLD', '-0.003'))  # -0.3%
+MINIMUM_BALANCE = float(os.getenv('MINIMUM_BALANCE', '10'))  # Minimum $10 USDT
 client = Client(API_KEY, API_SECRET)
 
-# Global variable to track entry price
+# Global variable to track entry price and recent exits
 entry_data = {}
+recent_exits = {}
 
 def send_telegram_message(message: str):
     print(f"[TELEGRAM] {message}")
@@ -23,6 +25,15 @@ def send_telegram_message(message: str):
         requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": message}, timeout=10)
     except Exception as e:
         print(f"Telegram error: {e}")
+
+def check_api_connection():
+    """Check if Binance API is reachable"""
+    try:
+        client.ping()
+        return True
+    except Exception as e:
+        print(f"[ERROR] API connection check failed: {e}")
+        return False
 
 def get_wallet_equity():
     print("Fetching wallet equity...")
@@ -35,7 +46,7 @@ def get_wallet_equity():
         else: 
             return 0.0
     except Exception as e:
-        send_telegram_message(f"Funds API error: {e}")
+        send_telegram_message(f"❌ Funds API error: {e}")
         print(f"[ERROR] get_wallet_equity: {e}")
         return 0.0
 
@@ -55,6 +66,21 @@ def get_funding_interval(symbol):
         return 8
     except Exception as e:
         return 8
+
+def get_symbol_info(symbol):
+    """Get minimum quantity and price precision for symbol"""
+    try:
+        info = client.futures_exchange_info()
+        for s in info['symbols']:
+            if s['symbol'] == symbol:
+                for f in s['filters']:
+                    if f['filterType'] == 'LOT_SIZE':
+                        min_qty = float(f['minQty'])
+                        return {'min_qty': min_qty}
+        return {'min_qty': 0.001}
+    except Exception as e:
+        print(f"[ERROR] get_symbol_info: {e}")
+        return {'min_qty': 0.001}
 
 def fetch_funding_rates():
     print("Fetching PREDICTED funding rates for all perpetual symbols...")
@@ -81,7 +107,7 @@ def fetch_funding_rates():
         print(f"Funding rates fetched: {len(rates)} symbols, {negative_count} negative")
         return rates
     except Exception as e:
-        send_telegram_message(f"Funding rate fetch error: {e}")
+        send_telegram_message(f"❌ Funding rate fetch error: {e}")
         print(f"[ERROR] fetch_funding_rates: {e}")
         return {}
 
@@ -124,11 +150,13 @@ def format_countdown(seconds):
     else:
         return f"{secs}s"
 
-def is_entry_window_open(interval):
+def is_in_entry_window(interval):
+    """Check if coin is in 45-47 min window before its funding"""
     secs = seconds_to_next_funding(interval)
-    return 2700 <= secs <= 2820  # 45-47 min for both 4h and 8h
+    return 2700 <= secs <= 2820  # 45-47 min
 
-def is_close_window_open(interval):
+def is_in_close_window(interval):
+    """Check if coin is in last 60 seconds before its funding"""
     secs = seconds_to_next_funding(interval)
     return 0 < secs <= 60
 
@@ -140,23 +168,60 @@ def position_exists():
         print(f"Active position exists? {active}")
         return active
     except Exception as e:
-        send_telegram_message(f"Position check error: {e}")
+        send_telegram_message(f"❌ Position check error: {e}")
         print(f"[ERROR] position_exists: {e}")
         return True
+
+def recently_exited(symbol, cooldown_minutes=5):
+    """Check if symbol was recently exited (cooldown protection)"""
+    global recent_exits
+    if symbol in recent_exits:
+        exit_time = recent_exits[symbol]
+        elapsed = (datetime.now().timestamp() - exit_time) / 60
+        if elapsed < cooldown_minutes:
+            return True
+    return False
 
 def place_long_position(symbol, capital, rate):
     global entry_data
     print(f"Placing LONG position on {symbol} with capital: {capital}")
+    
     try:
+        # Step 1: API Connection Check
+        if not check_api_connection():
+            send_telegram_message(f"❌ TRADE CANCELED: API connection lost")
+            print("[ERROR] API connection check failed")
+            return
+        
+        # Step 2: Get current price
         ticker = client.futures_symbol_ticker(symbol=symbol)
         price = float(ticker['price'])
+        
+        # Step 3: Price validation
+        if price <= 0:
+            send_telegram_message(f"❌ TRADE CANCELED: Invalid price for {symbol}")
+            print(f"[ERROR] Invalid price: {price}")
+            return
+        
+        # Step 4: Calculate quantity
+        symbol_info = get_symbol_info(symbol)
+        min_qty = symbol_info['min_qty']
         quantity = round(capital / price, 3)
+        
+        # Step 5: Quantity validation
+        if quantity < min_qty:
+            send_telegram_message(f"❌ TRADE CANCELED: Quantity {quantity} below minimum {min_qty} for {symbol}")
+            print(f"[ERROR] Quantity too small: {quantity} < {min_qty}")
+            return
+        
+        # Step 6: Calculate values
         stop_loss_price = round(price * 0.90, 3)
         amount = round(price * quantity, 2)
         
-        countdown_str = format_countdown(seconds_to_next_funding(get_funding_interval(symbol)))
+        interval = get_funding_interval(symbol)
+        countdown_str = format_countdown(seconds_to_next_funding(interval))
         
-        # Pre-entry alert
+        # Step 7: Pre-entry alert
         pre_msg = f"⚠️ PREPARING TO ENTER LONG\n\n"
         pre_msg += f"Coin: {symbol}\n"
         pre_msg += f"Funding Rate: {100*rate:.4f}%\n"
@@ -165,16 +230,42 @@ def place_long_position(symbol, capital, rate):
         pre_msg += f"Amount: ${amount} USDT\n"
         pre_msg += f"Stop Loss: ${stop_loss_price}\n"
         pre_msg += f"Countdown: {countdown_str}\n\n"
-        pre_msg += f"🔄 Confirming coin is still lowest..."
+        pre_msg += f"🔄 Running final validations..."
         send_telegram_message(pre_msg)
         
         time.sleep(2)
         
-        # Confirmation alert
-        confirm_msg = f"✅ CONFIRMED - {symbol} still lowest ({100*rate:.4f}%)\n🚀 Entering position..."
+        # Step 8: Final position check
+        if position_exists():
+            send_telegram_message(f"❌ TRADE CANCELED: Active position already exists\nCannot enter {symbol} while another position is open")
+            print("[CANCELED] Active position found during final check")
+            return
+        
+        # Step 9: Final balance check
+        final_balance = get_wallet_equity()
+        if final_balance < MINIMUM_BALANCE:
+            send_telegram_message(f"❌ TRADE CANCELED: Balance ${final_balance} below minimum ${MINIMUM_BALANCE}")
+            print(f"[CANCELED] Insufficient balance: ${final_balance}")
+            return
+        
+        # Step 10: Cooldown check
+        if recently_exited(symbol):
+            send_telegram_message(f"❌ TRADE CANCELED: {symbol} in cooldown period (5 min)")
+            print(f"[CANCELED] Cooldown active for {symbol}")
+            return
+        
+        # Step 11: Confirmation alert
+        confirm_msg = f"✅ ALL CHECKS PASSED\n\n"
+        confirm_msg += f"✅ API Connected\n"
+        confirm_msg += f"✅ Price Valid: ${price}\n"
+        confirm_msg += f"✅ Quantity Valid: {quantity}\n"
+        confirm_msg += f"✅ Balance Sufficient: ${final_balance}\n"
+        confirm_msg += f"✅ No Active Positions\n"
+        confirm_msg += f"✅ {symbol} most negative ({100*rate:.4f}%)\n\n"
+        confirm_msg += f"🚀 Entering position NOW..."
         send_telegram_message(confirm_msg)
         
-        # Place order
+        # Step 12: Place order
         order = client.futures_create_order(
             symbol=symbol,
             side=Client.SIDE_BUY,
@@ -183,21 +274,21 @@ def place_long_position(symbol, capital, rate):
             positionSide='LONG'
         )
         
-        # Store entry data for exit P&L calculation
+        # Step 13: Store entry data
         entry_data[symbol] = {
             'entry_price': price,
             'quantity': quantity,
             'entry_amount': amount
         }
         
-        # Entry confirmation
+        # Step 14: Entry confirmation
         entry_msg = f"✅ LONG OPENED: {symbol}\n"
         entry_msg += f"Order ID: {order['orderId']}\n"
         entry_msg += f"Status: {order['status']}"
         send_telegram_message(entry_msg)
         print(f"LONG order placed for {symbol}. Order: {order}")
         
-        # Set stop loss
+        # Step 15: Set stop loss
         sl_order = client.futures_create_order(
             symbol=symbol,
             side=Client.SIDE_SELL,
@@ -207,7 +298,7 @@ def place_long_position(symbol, capital, rate):
             workingType='MARK_PRICE'
         )
         
-        sl_msg = f"✅ STOP LOSS SET: ${stop_loss_price}"
+        sl_msg = f"✅ STOP LOSS SET: ${stop_loss_price} (10% below entry)"
         send_telegram_message(sl_msg)
         print(f"STOPLOSS order placed for {symbol}. Order: {sl_order}")
         
@@ -216,7 +307,7 @@ def place_long_position(symbol, capital, rate):
         print(f"[ERROR] place_long_position ({symbol}): {e}")
 
 def square_off_all():
-    global entry_data
+    global entry_data, recent_exits
     print("Squaring off all positions...")
     try:
         positions = client.futures_position_information()
@@ -287,6 +378,9 @@ def square_off_all():
                 
                 print(f"Position closed: {sym}, qty: {amt}, P&L: ${pnl_usdt}")
                 
+                # Mark as recently exited (cooldown)
+                recent_exits[sym] = datetime.now().timestamp()
+                
                 # Clear entry data
                 if sym in entry_data:
                     del entry_data[sym]
@@ -319,13 +413,19 @@ def track_pnl():
 
 def run_bot():
     print("##### Bot starting... #####")
-    send_telegram_message("🚦 Bot started & monitoring PREDICTED funding rates!\n✅ Supports both 4-hour and 8-hour funding\n✅ Full capital investment per trade")
+    send_telegram_message("🚦 Bot started & monitoring PREDICTED funding rates!\n\n✅ 4-hour & 8-hour funding support\n✅ Most negative coin in 45-min window\n✅ Full capital investment\n✅ Enhanced safety checks\n✅ Balance & position validation\n✅ API connection monitoring\n✅ 5-min cooldown protection")
     last_report = time.time()
     
     while True:
         try:
             now_str = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
             print(f"\n[{now_str}] New cycle started.")
+            
+            # Check API connection
+            if not check_api_connection():
+                send_telegram_message("⚠️ API connection issue - retrying in 1 min...")
+                time.sleep(60)
+                continue
             
             rates = fetch_funding_rates()
             eligible = filter_eligible_symbols(rates, FUNDING_RATE_THRESHOLD)
@@ -343,64 +443,83 @@ def run_bot():
             else:
                 sorted_eligible = sorted(eligible.items(), key=lambda x: x[1]['rate'])
                 msg += f"✅ {len(eligible)} coins below -0.3% threshold:\n\n"
-                for sym, data in sorted_eligible:
+                for sym, data in sorted_eligible[:10]:  # Show top 10
                     countdown = format_countdown(seconds_to_next_funding(data['interval']))
                     msg += f"{sym}: {100*data['rate']:.4f}% (Next: {countdown})\n"
-                msg += f"\n🎯 Will enter: {sorted_eligible[0][0]} (most negative)"
+                
+                # Find coins in 45-min window
+                coins_in_window = {k: v for k, v in eligible.items() if is_in_entry_window(v['interval'])}
+                if coins_in_window:
+                    most_negative_in_window = min(coins_in_window.items(), key=lambda x: x[1]['rate'])
+                    msg += f"\n🎯 In 45-min window: {most_negative_in_window[0]} ({100*most_negative_in_window[1]['rate']:.4f}%)"
+                else:
+                    msg += f"\n⏳ Waiting for 45-min window..."
             
             send_telegram_message(msg)
             print(f"Eligible coins: {len(eligible)}")
 
-            # Entry logic
-            if position_exists():
-                print("Active position found, skipping new entry.")
-            else:
-                # Check if any coin is in its entry window
-                for sym, data in eligible.items():
-                    if is_entry_window_open(data['interval']):
-                        send_telegram_message(f"⏰ ENTRY WINDOW OPEN! Re-scanning to confirm best coin...")
-                        capital = get_wallet_equity()
-                        print(f"Entry window open for {sym}. Capital: ${capital}")
+            # Entry logic - find coins in 45-min window
+            if not position_exists():
+                # Check wallet balance first
+                current_balance = get_wallet_equity()
+                
+                if current_balance < MINIMUM_BALANCE:
+                    send_telegram_message(f"⚠️ Wallet balance: ${current_balance} USDT\n❌ Below minimum ${MINIMUM_BALANCE} - Skipping entry")
+                    print(f"Insufficient balance: ${current_balance}")
+                else:
+                    coins_in_window = {k: v for k, v in eligible.items() if is_in_entry_window(v['interval'])}
+                    
+                    if coins_in_window:
+                        send_telegram_message(f"⏰ 45-MIN WINDOW OPEN!\n\nStep 1: Re-scanning coins in window...\nStep 2: Checking wallet balance...\n💰 Wallet Balance: ${current_balance} USDT ✅\n\nStep 3: Checking for active positions...")
                         
-                        # Re-scan all coins
-                        fresh_rates = fetch_funding_rates()
-                        fresh_eligible = filter_eligible_symbols(fresh_rates, FUNDING_RATE_THRESHOLD)
-                        
-                        if not fresh_eligible:
-                            send_telegram_message("❌ No eligible coins at entry time (all rates changed)")
-                            print("No eligible coins at entry time")
+                        # Double-check no position exists
+                        if position_exists():
+                            send_telegram_message(f"❌ TRADE CANCELED: Active position found during final check")
+                            print("Active position found, skipping entry")
                         else:
-                            # Find lowest
-                            sorted_fresh = sorted(fresh_eligible.items(), key=lambda x: x[1]['rate'])
-                            best_symbol = sorted_fresh[0][0]
-                            best_rate = sorted_fresh[0][1]['rate']
+                            send_telegram_message(f"✅ No active positions\n\nStep 4: Finding most negative coin...")
                             
-                            # Check if coin switched
-                            if best_symbol != sym:
-                                switch_msg = f"⚠️ COIN CHANGED!\n"
-                                switch_msg += f"Was: {sym}\n"
-                                switch_msg += f"Now: {best_symbol} ({100*best_rate:.4f}%)\n"
-                                switch_msg += f"Switching to {best_symbol}..."
-                                send_telegram_message(switch_msg)
+                            # Re-scan to get fresh rates
+                            fresh_rates = fetch_funding_rates()
+                            fresh_eligible = filter_eligible_symbols(fresh_rates, FUNDING_RATE_THRESHOLD)
+                            fresh_in_window = {k: v for k, v in fresh_eligible.items() if is_in_entry_window(v['interval'])}
                             
-                            place_long_position(best_symbol, capital, best_rate)
-                        break
+                            if not fresh_in_window:
+                                send_telegram_message("❌ No eligible coins in 45-min window at entry time")
+                                print("No eligible coins in window at entry time")
+                            else:
+                                # Find MOST NEGATIVE coin in 45-min window
+                                sorted_window = sorted(fresh_in_window.items(), key=lambda x: x[1]['rate'])
+                                best_symbol = sorted_window[0][0]
+                                best_rate = sorted_window[0][1]['rate']
+                                
+                                rescan_msg = f"🔄 RE-SCAN (45-min window):\n\n"
+                                for sym, data in sorted_window[:5]:
+                                    rescan_msg += f"{sym}: {100*data['rate']:.4f}%\n"
+                                rescan_msg += f"\n✅ Most negative: {best_symbol} ({100*best_rate:.4f}%)\n\nStep 5: Final validation & entry..."
+                                send_telegram_message(rescan_msg)
+                                
+                                print(f"Best coin in 45-min window: {best_symbol} with rate {best_rate}")
+                                place_long_position(best_symbol, current_balance, best_rate)
+            else:
+                print("Active position exists, skipping entry check")
             
-            # Exit logic - check all intervals
+            # Exit logic
             if position_exists():
                 positions = client.futures_position_information()
                 for position in positions:
                     if position['positionSide'] == 'LONG' and float(position['positionAmt']) > 0:
                         sym = position['symbol']
                         interval = get_funding_interval(sym)
-                        if is_close_window_open(interval):
+                        if is_in_close_window(interval):
                             square_off_all()
                             break
             
             # Daily P&L report
             if time.time() - last_report > 43200:
                 track_pnl()
-                send_telegram_message("📊 Daily status: Bot healthy")
+                balance = get_wallet_equity()
+                send_telegram_message(f"📊 Daily status: Bot healthy\n💰 Current Balance: ${balance} USDT")
                 last_report = time.time()
             
             print("Cycle complete. Sleeping for 1 hour...\n")
