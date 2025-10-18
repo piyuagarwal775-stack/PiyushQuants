@@ -384,18 +384,20 @@ def run_bot():
                         symbol, data, time_left = nearest
                         
                         # Smart wait logic
-                        if time_left > 2820:  # More than 47 min
-                            wait_time = time_left - 2730  # Wait until 45.5 min
+                        if time_left > 2760:  # More than 46 min
+                            wait_time = time_left - 2760  # Wait until exactly 46 min mark
                             wait_minutes = wait_time / 60
                             
                             now = datetime.now().timestamp()
-                            entry_time = now + wait_time
+                            rescan_time = now + wait_time  # 46 min mark
+                            entry_time = rescan_time + 60   # 45 min mark
                             exit_time = now + time_left - 60
-                            hold_duration = (time_left - 60 - wait_time) / 60
+                            hold_duration = (time_left - 120) / 60
                             
                             wait_msg = f"⏰ SMART WAIT ACTIVATED\n\n"
                             wait_msg += f"Nearest funding: {format_countdown(time_left)}\n"
                             wait_msg += f"Most negative: {symbol} ({100*data['rate']:.4f}%)\n\n"
+                            wait_msg += f"Will re-scan at: {format_time(rescan_time)} (46 min mark)\n"
                             wait_msg += f"Will enter at: {format_time(entry_time)} (45 min mark)\n"
                             wait_msg += f"Will exit at: {format_time(exit_time)}\n"
                             wait_msg += f"Hold duration: ~{int(hold_duration)} min\n\n"
@@ -404,31 +406,41 @@ def run_bot():
                             
                             time.sleep(wait_time)
                             
-                            # Re-scan after wait
-                            send_telegram_message(f"⏰ 45-MIN WINDOW REACHED!\n\nRe-scanning...")
+                            # Re-scan at 46-min mark
+                            send_telegram_message(f"🔍 46-MIN MARK REACHED!\n\nRe-scanning for best coin...")
                             fresh_rates = fetch_funding_rates()
                             fresh_eligible = filter_eligible_symbols(fresh_rates, FUNDING_RATE_THRESHOLD)
                             
                             if fresh_eligible:
-                                # Find most negative in 45-min window
+                                # Find most negative coin with 44-48 min left
                                 fresh_in_window = {k: v for k, v in fresh_eligible.items() 
-                                                 if 2700 <= seconds_to_next_funding(v['interval']) <= 2820}
+                                                 if 2640 <= seconds_to_next_funding(v['interval']) <= 2880}
                                 
                                 if fresh_in_window:
                                     sorted_window = sorted(fresh_in_window.items(), key=lambda x: x[1]['rate'])
                                     best_symbol = sorted_window[0][0]
                                     best_rate = sorted_window[0][1]['rate']
                                     
-                                    rescan_msg = f"🔄 CONFIRMATION SCAN:\n\n"
+                                    rescan_msg = f"✅ FOUND {len(fresh_in_window)} COINS IN WINDOW:\n\n"
                                     for sym, data in sorted_window[:5]:
-                                        rescan_msg += f"{sym}: {100*data['rate']:.4f}%\n"
-                                    rescan_msg += f"\n✅ Most negative: {best_symbol}\n\nEntering..."
+                                        countdown = format_countdown(seconds_to_next_funding(data['interval']))
+                                        rescan_msg += f"{sym}: {100*data['rate']:.4f}% ({countdown})\n"
+                                    rescan_msg += f"\n🎯 Best: {best_symbol} ({100*best_rate:.4f}%)\n\n"
+                                    rescan_msg += f"⏳ Waiting 60 seconds to enter at 45-min mark..."
                                     send_telegram_message(rescan_msg)
                                     
+                                    # Wait exactly 60 seconds to hit 45-min mark
+                                    time.sleep(60)
+                                    
+                                    send_telegram_message(f"⏰ 45-MIN MARK! Entering {best_symbol}...")
                                     place_long_position(best_symbol, current_balance, best_rate)
+                                else:
+                                    send_telegram_message(f"❌ No coins in 44-48 min window during re-scan")
+                            else:
+                                send_telegram_message(f"❌ No coins below -0.3% during 46-min re-scan")
                         
                         elif 2700 <= time_left <= 2820:  # Already at 45-47 min
-                            send_telegram_message(f"⏰ 45-MIN WINDOW! Entering...")
+                            send_telegram_message(f"⏰ ALREADY IN 45-MIN WINDOW! Entering...")
                             place_long_position(symbol, current_balance, data['rate'])
             
             # Exit logic
