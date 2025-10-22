@@ -4,7 +4,6 @@ import requests
 from datetime import datetime, timezone, timedelta
 from binance.client import Client
 from dotenv import load_dotenv
-from decimal import Decimal, ROUND_DOWN
 
 load_dotenv()
 API_KEY = os.getenv('BINANCE_API_KEY')
@@ -62,23 +61,34 @@ def get_funding_interval(symbol):
 def get_symbol_info(symbol):
     try:
         info = client.futures_exchange_info()
-        s = next((x for x in info['symbols'] if x['symbol'] == symbol), None)
-        if not s:
-            return {'min_qty': 0.001, 'step_size': '0.001', 'tick_size': '0.0001'}
-        lot = next((f for f in s['filters'] if f['filterType'] == 'LOT_SIZE'), {})
-        price_filter = next((f for f in s['filters'] if f['filterType'] == 'PRICE_FILTER'), {})
-        return {
-            'min_qty': float(lot.get('minQty', '0.001')),
-            'step_size': lot.get('stepSize', '0.001'),
-            'tick_size': price_filter.get('tickSize', '0.0001'),
-        }
-    except:
-        return {'min_qty': 0.001, 'step_size': '0.001', 'tick_size': '0.0001'}
-
-def to_step_str(value, step):
-    step_dec = Decimal(str(step))
-    quantized = (Decimal(str(value)) / step_dec).quantize(Decimal('1'), rounding=ROUND_DOWN) * step_dec
-    return format(quantized, 'f')
+        for s in info['symbols']:
+            if s['symbol'] == symbol:
+                min_qty = 0.001
+                step_size = 0.001
+                precision = 3
+                
+                for f in s['filters']:
+                    if f['filterType'] == 'LOT_SIZE':
+                        min_qty = float(f['minQty'])
+                        step_size = float(f['stepSize'])
+                        
+                        # Calculate precision from stepSize
+                        step_str = f['stepSize'].rstrip('0')
+                        if '.' in step_str:
+                            precision = len(step_str.split('.')[1])
+                        else:
+                            precision = 0
+                
+                return {
+                    'min_qty': min_qty,
+                    'step_size': step_size,
+                    'precision': precision
+                }
+        
+        return {'min_qty': 0.001, 'step_size': 0.001, 'precision': 3}
+    except Exception as e:
+        print(f"[ERROR] Symbol info: {e}")
+        return {'min_qty': 0.001, 'step_size': 0.001, 'precision': 3}
 
 def fetch_funding_rates():
     try:
@@ -176,21 +186,18 @@ def place_long_position(symbol, capital, rate):
             return
         
         symbol_info = get_symbol_info(symbol)
-        min_qty = Decimal(str(symbol_info['min_qty']))
-        step_size = symbol_info['step_size']
-        tick_size = symbol_info['tick_size']
-
-        quantity_raw = Decimal(str(capital)) / Decimal(str(price))
-        quantity = to_step_str(quantity_raw, step_size)
-
-        if Decimal(quantity) < min_qty:
+        min_qty = symbol_info['min_qty']
+        precision = symbol_info['precision']
+        
+        # Calculate quantity with correct precision
+        quantity = round(capital / price, precision)
+        
+        if quantity < min_qty:
             send_telegram_message(f"❌ TRADE CANCELED: Quantity {quantity} below minimum {min_qty}")
             return
         
-        stop_loss_price_raw = Decimal(str(price)) * Decimal('0.90')
-        stop_loss_price = to_step_str(stop_loss_price_raw, tick_size)
-
-        amount = round(float(Decimal(quantity) * Decimal(str(price))), 2)
+        stop_loss_price = round(price * 0.90, precision)
+        amount = round(price * quantity, 2)
         interval = get_funding_interval(symbol)
         
         # Calculate times
@@ -241,7 +248,7 @@ def place_long_position(symbol, capital, rate):
         
         entry_data[symbol] = {
             'entry_price': price,
-            'quantity': float(Decimal(quantity)),
+            'quantity': quantity,
             'entry_amount': amount,
             'entry_time': now
         }
