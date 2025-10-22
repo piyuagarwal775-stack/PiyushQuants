@@ -144,16 +144,32 @@ def format_time(timestamp):
     return datetime.fromtimestamp(timestamp).strftime("%I:%M %p")
 
 def find_nearest_funding_coin(eligible_coins):
-    nearest = None
-    min_time = float('inf')
+    if not eligible_coins:
+        return None
     
+    # Calculate funding times for all coins
+    coins_with_time = []
     for symbol, data in eligible_coins.items():
         time_left = seconds_to_next_funding(data['interval'])
-        if time_left < min_time:
-            min_time = time_left
-            nearest = (symbol, data, time_left)
+        coins_with_time.append((symbol, data, time_left))
     
-    return nearest
+    # Find the minimum funding time
+    min_time = min(coins_with_time, key=lambda x: x[2])[2]
+    
+    # Filter coins within 3 seconds of minimum time
+    nearest_coins = [
+        (symbol, data, time_left) 
+        for symbol, data, time_left in coins_with_time 
+        if abs(time_left - min_time) <= 3
+    ]
+    
+    # If multiple coins are within 3 seconds, pick most negative
+    if len(nearest_coins) > 1:
+        most_negative = min(nearest_coins, key=lambda x: x[1]['rate'])
+        return most_negative
+    else:
+        # Only one coin in nearest window, return it
+        return nearest_coins[0]
 
 def position_exists():
     try:
