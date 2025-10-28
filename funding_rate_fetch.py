@@ -276,16 +276,35 @@ def place_long_position(symbol, capital, rate):
         entry_msg += f"Hold: ~{int(hold_duration)} min"
         send_telegram_message(entry_msg)
         
-        sl_order = client.futures_create_order(
-            symbol=symbol,
-            side=Client.SIDE_SELL,
-            type='STOP_MARKET',
-            stopPrice=stop_loss_price,
-            closePosition=True,
-            workingType='MARK_PRICE'
-        )
-        
-        send_telegram_message(f"✅ STOP LOSS SET: ${stop_loss_price}")
+        # Set stop loss with error handling
+        try:
+            sl_order = client.futures_create_order(
+                symbol=symbol,
+                side=Client.SIDE_SELL,
+                type='STOP_MARKET',
+                stopPrice=stop_loss_price,
+                closePosition=True,
+                positionSide='LONG',
+                workingType='MARK_PRICE'
+            )
+            send_telegram_message(f"✅ STOP LOSS SET: ${stop_loss_price}")
+        except Exception as sl_error:
+            if '4061' in str(sl_error):
+                # Retry without positionSide for compatibility
+                try:
+                    sl_order = client.futures_create_order(
+                        symbol=symbol,
+                        side=Client.SIDE_SELL,
+                        type='STOP_MARKET',
+                        stopPrice=stop_loss_price,
+                        closePosition=True,
+                        workingType='MARK_PRICE'
+                    )
+                    send_telegram_message(f"✅ STOP LOSS SET: ${stop_loss_price}")
+                except Exception as retry_error:
+                    send_telegram_message(f"⚠️ Stop loss failed: {retry_error}\nManual SL recommended!")
+            else:
+                send_telegram_message(f"⚠️ Stop loss error: {sl_error}\nPosition open but no SL!")
         
     except Exception as e:
         send_telegram_message(f"❌ Trade error: {e}")
