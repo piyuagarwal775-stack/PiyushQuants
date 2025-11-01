@@ -66,6 +66,7 @@ def get_symbol_info(symbol):
                 min_qty = 0.001
                 step_size = 0.001
                 precision = 3
+                price_precision = 2
                 
                 for f in s['filters']:
                     if f['filterType'] == 'LOT_SIZE':
@@ -78,17 +79,25 @@ def get_symbol_info(symbol):
                             precision = len(step_str.split('.')[1])
                         else:
                             precision = 0
+                    
+                    if f['filterType'] == 'PRICE_FILTER':
+                        tick_size = f['tickSize'].rstrip('0')
+                        if '.' in tick_size:
+                            price_precision = len(tick_size.split('.')[1])
+                        else:
+                            price_precision = 0
                 
                 return {
                     'min_qty': min_qty,
                     'step_size': step_size,
-                    'precision': precision
+                    'precision': precision,
+                    'price_precision': price_precision
                 }
         
-        return {'min_qty': 0.001, 'step_size': 0.001, 'precision': 3}
+        return {'min_qty': 0.001, 'step_size': 0.001, 'precision': 3, 'price_precision': 2}
     except Exception as e:
         print(f"[ERROR] Symbol info: {e}")
-        return {'min_qty': 0.001, 'step_size': 0.001, 'precision': 3}
+        return {'min_qty': 0.001, 'step_size': 0.001, 'precision': 3, 'price_precision': 2}
 
 def fetch_funding_rates():
     try:
@@ -204,6 +213,7 @@ def place_long_position(symbol, capital, rate):
         symbol_info = get_symbol_info(symbol)
         min_qty = symbol_info['min_qty']
         precision = symbol_info['precision']
+        price_precision = symbol_info['price_precision']
         
         # Calculate quantity with correct precision
         quantity = round(capital / price, precision)
@@ -212,7 +222,8 @@ def place_long_position(symbol, capital, rate):
             send_telegram_message(f"❌ TRADE CANCELED: Quantity {quantity} below minimum {min_qty}")
             return
         
-        stop_loss_price = round(price * 0.90, precision)
+        # Calculate stop loss with PRICE precision (not quantity precision)
+        stop_loss_price = round(price * 0.90, price_precision)
         amount = round(price * quantity, 2)
         interval = get_funding_interval(symbol)
         
@@ -276,7 +287,7 @@ def place_long_position(symbol, capital, rate):
         entry_msg += f"Hold: ~{int(hold_duration)} min"
         send_telegram_message(entry_msg)
         
-        # Set stop loss with error handling
+        # Set 10% stop loss
         try:
             sl_order = client.futures_create_order(
                 symbol=symbol,
@@ -289,22 +300,7 @@ def place_long_position(symbol, capital, rate):
             )
             send_telegram_message(f"✅ STOP LOSS SET: ${stop_loss_price}")
         except Exception as sl_error:
-            if '4061' in str(sl_error):
-                # Retry without positionSide for compatibility
-                try:
-                    sl_order = client.futures_create_order(
-                        symbol=symbol,
-                        side=Client.SIDE_SELL,
-                        type='STOP_MARKET',
-                        stopPrice=stop_loss_price,
-                        closePosition=True,
-                        workingType='MARK_PRICE'
-                    )
-                    send_telegram_message(f"✅ STOP LOSS SET: ${stop_loss_price}")
-                except Exception as retry_error:
-                    send_telegram_message(f"⚠️ Stop loss failed: {retry_error}\nManual SL recommended!")
-            else:
-                send_telegram_message(f"⚠️ Stop loss error: {sl_error}\nPosition open but no SL!")
+            send_telegram_message(f"❌ Stop loss error: {sl_error}\nPosition open but no SL!")
         
     except Exception as e:
         send_telegram_message(f"❌ Trade error: {e}")
