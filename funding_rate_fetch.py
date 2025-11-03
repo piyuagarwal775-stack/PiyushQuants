@@ -397,7 +397,7 @@ def track_pnl():
         print(f"[ERROR] P&L: {e}")
 
 def run_bot():
-    send_telegram_message("🚦 Bot started!\n✅ 4h & 8h funding\n✅ Smart wait system\n✅ Enhanced safety\n✅ IST timezone")
+    send_telegram_message("🚦 Bot started!\n✅ 4h & 8h funding\n✅ Smart scan logic\n✅ Auto-exit at 1 min\n✅ IST timezone")
     last_report = time.time()
     
     while True:
@@ -464,39 +464,50 @@ def run_bot():
             
             send_telegram_message(msg)
             
-            # Entry logic - ONLY if coin has less than 60 minutes
+            # Smart entry logic
             if eligible:
                 nearest = find_nearest_funding_coin(eligible)
                 if nearest:
                     symbol, data, time_left = nearest
+                    time_left_minutes = time_left / 60
                     
-                    # ONLY activate smart wait if less than 60 minutes
-                    if time_left < 3600:  # Less than 60 minutes
+                    # Calculate if next hourly scan will miss the trade
+                    next_scan_time_left = time_left - 3600  # Time left after 1 hour
+                    
+                    # If next scan will have less than 45 minutes, activate smart wait NOW
+                    if next_scan_time_left < 2700:  # 45 minutes in seconds
                         current_balance = get_wallet_equity()
                         
                         if current_balance < MINIMUM_BALANCE:
                             send_telegram_message(f"⚠️ Balance: ${current_balance} (below ${MINIMUM_BALANCE})")
                         else:
-                            # Time left is less than 60 min - proceed with smart wait
-                            if time_left > 3000:  # More than 50 min
+                            # Activate SMART WAIT
+                            wait_msg = f"⚠️ SMART SCAN DETECTED!\n\n"
+                            wait_msg += f"Current time left: {format_countdown(time_left)}\n"
+                            wait_msg += f"Next scan would have: {format_countdown(max(0, next_scan_time_left))}\n"
+                            wait_msg += f"❌ Next scan < 45 min - TRADE WOULD BE MISSED!\n\n"
+                            wait_msg += f"✅ ACTIVATING SMART WAIT NOW!"
+                            send_telegram_message(wait_msg)
+                            
+                            # Calculate wait time to 50-min mark
+                            if time_left > 3000:  # More than 50 minutes
                                 wait_time = time_left - 3000  # Wait until 50-min mark
                                 wait_minutes = wait_time / 60
                                 
                                 now = datetime.now().timestamp()
                                 rescan_time = now + wait_time  # 50 min mark
-                                entry_time = rescan_time + 300  # 45 min mark (50 - 5 min for scanning)
+                                entry_time = rescan_time + 300  # 45 min mark
                                 exit_time = now + time_left - 60
                                 hold_duration = (time_left - 120) / 60
                                 
-                                wait_msg = f"⏰ SMART WAIT ACTIVATED\n\n"
-                                wait_msg += f"Nearest funding: {format_countdown(time_left)}\n"
-                                wait_msg += f"Most negative: {symbol} ({100*data['rate']:.4f}%)\n\n"
-                                wait_msg += f"Will re-scan at: {format_time_ist(rescan_time)} (50 min mark)\n"
-                                wait_msg += f"Will enter at: {format_time_ist(entry_time)} (45 min mark)\n"
-                                wait_msg += f"Will exit at: {format_time_ist(exit_time)}\n"
-                                wait_msg += f"Hold duration: ~{int(hold_duration)} min\n\n"
-                                wait_msg += f"💤 Waiting {int(wait_minutes)} minutes..."
-                                send_telegram_message(wait_msg)
+                                smart_msg = f"📊 SMART WAIT PLAN:\n\n"
+                                smart_msg += f"Most negative: {symbol} ({100*data['rate']:.4f}%)\n"
+                                smart_msg += f"Re-scan at: {format_time_ist(rescan_time)} (50 min mark)\n"
+                                smart_msg += f"Enter at: {format_time_ist(entry_time)} (45 min mark)\n"
+                                smart_msg += f"Exit at: {format_time_ist(exit_time)}\n"
+                                smart_msg += f"Hold duration: ~{int(hold_duration)} min\n\n"
+                                smart_msg += f"💤 Waiting {int(wait_minutes)} minutes..."
+                                send_telegram_message(smart_msg)
                                 
                                 time.sleep(wait_time)
                                 
@@ -543,8 +554,8 @@ def run_bot():
                                 time.sleep(wait_for_entry)
                                 place_long_position(symbol, current_balance, data['rate'])
                     else:
-                        # More than 60 minutes - just log and continue scanning
-                        print(f"Coin {symbol} has {int(time_left/60)} minutes left. Continuing hourly scans...")
+                        # Safe to sleep 1 hour - next scan will still have > 45 min
+                        print(f"Safe to scan in 1 hour. Next scan will have {int(next_scan_time_left/60)} minutes left.")
             
             # P&L report
             if time.time() - last_report > 43200:
