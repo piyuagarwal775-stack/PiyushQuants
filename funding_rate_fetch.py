@@ -345,8 +345,7 @@ def square_off_all():
                     side=Client.SIDE_SELL,
                     type=Client.ORDER_TYPE_MARKET,
                     quantity=str(amt),
-                    positionSide='LONG',
-                    reduceOnly=True
+                    positionSide='LONG'
                 )
                 
                 exit_amount = round(exit_price * amt, 2)
